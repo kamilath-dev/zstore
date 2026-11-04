@@ -1,0 +1,6 @@
+{
+  "name": "ZStore Benin - Décoration d'Intérieur & Fragrances",
+  "description": "Boutique en ligne haut de gamme à Cotonou : bougies parfumées artisanales, diffuseurs d'ambiance, vases sculpturaux, art de la table et coffrets cadeaux raffinés.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

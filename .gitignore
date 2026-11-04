@@ -1,0 +1,20 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+
+# Local Firebase migration inventories and credentials
+.migration-inventory/
+.firebase/
+.runtimeconfig.json
+service-account*.json
+serviceAccount*.json
+*-firebase-adminsdk-*.json
+*.pem
+*.p12
+*.pfx
+*.key

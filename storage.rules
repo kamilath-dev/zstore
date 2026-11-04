@@ -1,0 +1,42 @@
+rules_version = '2';
+
+// Firebase Storage Security Rules for ZStore Bénin
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    // Default deny for all unmatched paths
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && request.auth.token.admin == true;
+    }
+
+    function isValidImage(imageId) {
+      return request.resource.contentType.matches('image/(jpeg|png|webp|avif)')
+        && imageId.matches('^[a-zA-Z0-9_\\-]+\\.(jpg|jpeg|png|webp|avif)$')
+        && request.resource.size <= 10 * 1024 * 1024; // 10MB max
+    }
+
+    // Product and Category media folders
+    // Public read: any customer or visitor can view product and category images
+    // Admin write: only verified administrators can upload, replace, or delete images
+    match /products/{imageId} {
+      allow read: if true;
+      allow create, update: if isAdmin() && isValidImage(imageId);
+      allow delete: if isAdmin();
+    }
+
+    match /categories/{imageId} {
+      allow read: if true;
+      allow create, update: if isAdmin() && isValidImage(imageId);
+      allow delete: if isAdmin();
+    }
+  }
+}

@@ -1,0 +1,156 @@
+{
+  "entities": {
+    "Product": {
+      "title": "Product",
+      "description": "Artisanal home decor, candle, diffuser, vase or gift box item",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "name": { "type": "string", "maxLength": 150 },
+        "slug": { "type": "string", "maxLength": 150 },
+        "category": { "type": "string", "enum": ["bougies", "diffuseurs", "vases", "decoration", "coffrets"] },
+        "categoryName": { "type": "string" },
+        "price": { "type": "number" },
+        "originalPrice": { "type": "number" },
+        "rating": { "type": "number" },
+        "reviewCount": { "type": "number" },
+        "stock": { "type": "number" },
+        "sku": { "type": "string", "maxLength": 50 },
+        "images": { "type": "array" },
+        "isFeatured": { "type": "boolean" },
+        "isNewArrival": { "type": "boolean" },
+        "isBestseller": { "type": "boolean" },
+        "tagline": { "type": "string", "maxLength": 250 },
+        "description": { "type": "string", "maxLength": 2000 },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["name", "category", "price", "stock", "sku"]
+    },
+    "Category": {
+      "title": "Category",
+      "description": "Store category with metadata and display imagery",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "slug": { "type": "string", "maxLength": 50 },
+        "name": { "type": "string", "maxLength": 100 },
+        "description": { "type": "string", "maxLength": 300 },
+        "image": { "type": "string" },
+        "itemCount": { "type": "number" }
+      },
+      "required": ["slug", "name"]
+    },
+    "Order": {
+      "title": "Order",
+      "description": "Customer purchase order for ZStore Benin",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "orderNumber": { "type": "string", "maxLength": 50 },
+        "date": { "type": "string" },
+        "userId": { "type": "string" },
+        "items": { "type": "array" },
+        "subtotal": { "type": "number" },
+        "deliveryFee": { "type": "number" },
+        "discount": { "type": "number" },
+        "appliedPromo": { "type": "string" },
+        "total": { "type": "number" },
+        "deliveryDetails": { "type": "object" },
+        "status": { "type": "string", "enum": ["en_attente", "en_preparation", "en_livraison", "livree", "annulee"] },
+        "paymentMethod": { "type": "string", "enum": ["paiement_livraison", "virement_bancaire", "mtn_momo_planned", "moov_money_planned"] },
+        "isPaid": { "type": "boolean" },
+        "timeline": { "type": "array" },
+        "createdAt": { "type": "string" }
+      },
+      "required": ["orderNumber", "subtotal", "total", "status", "paymentMethod", "userId"]
+    },
+    "UserProfile": {
+      "title": "UserProfile",
+      "description": "Customer profile containing contact and address info",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string", "format": "email" },
+        "displayName": { "type": "string", "maxLength": 100 },
+        "phone": { "type": "string", "maxLength": 30 },
+        "city": { "type": "string", "maxLength": 50 },
+        "district": { "type": "string", "maxLength": 100 },
+        "savedAddresses": { "type": "array" },
+        "wishlist": { "type": "array" },
+        "role": { "type": "string", "enum": ["customer", "admin"] }
+      },
+      "required": ["email", "displayName"]
+    },
+    "PromoCode": {
+      "title": "PromoCode",
+      "description": "Promotional voucher code for discounts",
+      "type": "object",
+      "properties": {
+        "code": { "type": "string", "maxLength": 30 },
+        "discountPercent": { "type": "number" },
+        "discountAmount": { "type": "number" },
+        "minOrderAmount": { "type": "number" },
+        "description": { "type": "string", "maxLength": 200 },
+        "isActive": { "type": "boolean" }
+      },
+      "required": ["code", "isActive"]
+    },
+    "Review": {
+      "title": "Review",
+      "description": "Verified customer feedback for products",
+      "type": "object",
+      "properties": {
+        "productId": { "type": "string" },
+        "authorName": { "type": "string", "maxLength": 100 },
+        "city": { "type": "string", "maxLength": 100 },
+        "rating": { "type": "number" },
+        "date": { "type": "string" },
+        "comment": { "type": "string", "maxLength": 1000 },
+        "verifiedPurchase": { "type": "boolean" },
+        "userId": { "type": "string" }
+      },
+      "required": ["productId", "authorName", "rating", "comment"]
+    },
+    "AdminRecord": {
+      "title": "AdminRecord",
+      "description": "Privileged administrator identity record in admins collection",
+      "type": "object",
+      "properties": {
+        "email": { "type": "string", "format": "email" },
+        "role": { "type": "string", "enum": ["admin"] },
+        "assignedAt": { "type": "string" }
+      },
+      "required": ["email", "role"]
+    }
+  },
+  "firestore": {
+    "/products/{productId}": {
+      "schema": { "$ref": "#/entities/Product" },
+      "description": "Public catalog items with write access restricted to administrators"
+    },
+    "/categories/{categoryId}": {
+      "schema": { "$ref": "#/entities/Category" },
+      "description": "Public store categories managed by administrators"
+    },
+    "/orders/{orderId}": {
+      "schema": { "$ref": "#/entities/Order" },
+      "description": "Customer orders visible to owner and store administrators"
+    },
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserProfile" },
+      "description": "User profiles visible and editable only by the authentic owner"
+    },
+    "/promos/{promoCode}": {
+      "schema": { "$ref": "#/entities/PromoCode" },
+      "description": "Publicly readable promo codes managed by administrators"
+    },
+    "/reviews/{reviewId}": {
+      "schema": { "$ref": "#/entities/Review" },
+      "description": "Customer reviews visible publicly and creatable by authentic users"
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminRecord" },
+      "description": "Authoritative list of administrator UIDs"
+    }
+  }
+}
