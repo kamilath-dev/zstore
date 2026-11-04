@@ -5,8 +5,12 @@
  * Exécution:
  *   npx tsx scripts/test-security-rules.ts
  *
- * This is a local policy simulation, not a Firebase Emulator test.
+ * This is a local policy simulation and source-contract check, not a Firebase Emulator test.
  */
+import { readFileSync } from 'node:fs';
+
+const firestoreRules = readFileSync(new URL('../firestore.rules', import.meta.url), 'utf8');
+const storeContextSource = readFileSync(new URL('../src/context/StoreContext.tsx', import.meta.url), 'utf8');
 
 interface SecurityTestResult {
   scenario: string;
@@ -55,8 +59,25 @@ class FirestoreRulesSimulator {
     return 'DENY';
   }
 
-  static evaluateProductRead(): 'ALLOW' | 'DENY' {
-    return 'ALLOW'; // allow read: if true;
+  static evaluatePublicRead(collectionName: string): 'ALLOW' | 'DENY' {
+    const blockStart = firestoreRules.indexOf(`match /${collectionName}/{`);
+    if (blockStart < 0) return 'DENY';
+    const blockEnd = firestoreRules.indexOf('\n    }', blockStart);
+    if (blockEnd < 0) return 'DENY';
+    return firestoreRules.slice(blockStart, blockEnd).includes('allow read: if true;')
+      ? 'ALLOW'
+      : 'DENY';
+  }
+
+  static evaluateCatalogWrite(collectionName: string, auth: any): 'ALLOW' | 'DENY' {
+    const blockStart = firestoreRules.indexOf(`match /${collectionName}/{`);
+    if (blockStart < 0) return 'DENY';
+    const blockEnd = firestoreRules.indexOf('\n    }', blockStart);
+    if (blockEnd < 0) return 'DENY';
+    const block = firestoreRules.slice(blockStart, blockEnd);
+    return block.includes('allow create, update: if isAdmin()') && this.isAdmin(auth)
+      ? 'ALLOW'
+      : 'DENY';
   }
 
   static evaluateOrderCreate(orderId: string, data: any, auth: any): 'ALLOW' | 'DENY' {
@@ -106,6 +127,18 @@ class FirestoreRulesSimulator {
   static evaluateAdminsAccess(): 'ALLOW' | 'DENY' {
     return 'DENY'; // allow read, write: if false;
   }
+
+  static evaluateUserGet(userId: string, auth: any): 'ALLOW' | 'DENY' {
+    const userRulesStart = firestoreRules.indexOf('match /users/{userId}');
+    const userRulesEnd = firestoreRules.indexOf('\n    }', userRulesStart);
+    if (userRulesStart < 0 || userRulesEnd < 0) return 'DENY';
+    const userRules = firestoreRules.slice(userRulesStart, userRulesEnd);
+    return userRules.includes('allow get: if isSignedIn()') &&
+      auth !== null &&
+      (auth.uid === userId || this.isAdmin(auth))
+      ? 'ALLOW'
+      : 'DENY';
+  }
 }
 
 // 2. Logique de simulation conforme aux règles Storage
@@ -144,19 +177,38 @@ async function runSecurityTestSuite() {
   const hackerAuth = { uid: 'hacker-666', email: 'pirate@darkweb.org', token: {} };
   const adminAuth = { uid: 'test-admin-uid', email: 'admin@example.test', token: { admin: true } };
 
-  // TEST 1: Lecture publique du catalogue
+  // Public reads are checked against the actual local rule blocks.
   {
-    const res = FirestoreRulesSimulator.evaluateProductRead();
-    results.push({
-      category: 'Catalogue',
-      scenario: 'Visiteur anonyme consulte le catalogue (/products)',
-      expected: 'ALLOW',
-      actual: res,
-      passed: res === 'ALLOW'
-    });
+    for (const collectionName of ['products', 'categories', 'promos']) {
+      const res = FirestoreRulesSimulator.evaluatePublicRead(collectionName);
+      results.push({
+        category: 'Catalogue',
+        scenario: `Visiteur anonyme lit /${collectionName} selon firestore.rules`,
+        expected: 'ALLOW',
+        actual: res,
+        passed: res === 'ALLOW'
+      });
+    }
   }
 
-  // TEST 2: Création de produit par un client ordinaire
+  // Verify the live listeners use the same paths and clean up their subscriptions.
+  {
+    for (const collectionName of ['products', 'categories', 'promos']) {
+      const usesExpectedPath = storeContextSource.includes(`collection(db, '${collectionName}')`);
+      const hasSnapshotListener = storeContextSource.includes('onSnapshot(');
+      const cleansUpListener = storeContextSource.includes('return () => unsubscribe();');
+      const passed = usesExpectedPath && hasSnapshotListener && cleansUpListener;
+      results.push({
+        category: 'Listeners',
+        scenario: `StoreContext écoute /${collectionName} et nettoie ses subscriptions`,
+        expected: 'ALLOW',
+        actual: passed ? 'ALLOW' : 'DENY',
+        passed
+      });
+    }
+  }
+
+  // TEST: Création de produit par un client ordinaire
   {
     const res = FirestoreRulesSimulator.evaluateProductCreate('prod-1', {
       name: 'Faux produit', category: 'bougies', price: 1000, stock: 10, sku: 'SKU-01'
@@ -168,6 +220,20 @@ async function runSecurityTestSuite() {
       actual: res,
       passed: res === 'DENY'
     });
+  }
+
+  // Ordinary users cannot write categories or promotions.
+  {
+    for (const collectionName of ['categories', 'promos']) {
+      const res = FirestoreRulesSimulator.evaluateCatalogWrite(collectionName, customerAuth);
+      results.push({
+        category: 'Catalogue',
+        scenario: `Client ordinaire ne peut pas écrire dans /${collectionName}`,
+        expected: 'DENY',
+        actual: res,
+        passed: res === 'DENY'
+      });
+    }
   }
 
   // TEST 3: Création de produit par administrateur authentifié
@@ -348,6 +414,18 @@ async function runSecurityTestSuite() {
     results.push({
       category: 'Audit & Admins',
       scenario: 'Client ou attaquant tente de lire ou écrire dans /admins',
+      expected: 'DENY',
+      actual: res,
+      passed: res === 'DENY'
+    });
+  }
+
+  // A signed-in customer cannot fetch another customer's private profile.
+  {
+    const res = FirestoreRulesSimulator.evaluateUserGet('another-customer', customerAuth);
+    results.push({
+      category: 'Profils',
+      scenario: 'Client ne peut pas lire le profil privé d’un autre utilisateur',
       expected: 'DENY',
       actual: res,
       passed: res === 'DENY'

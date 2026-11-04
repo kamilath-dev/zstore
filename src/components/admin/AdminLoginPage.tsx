@@ -13,7 +13,6 @@ import {
   ExternalLink
 } from 'lucide-react';
 import { useAuth } from '../../context/AuthContext';
-import { auth, sendPasswordResetEmail } from '../../services/firebase';
 
 interface AdminLoginPageProps {
   onSuccessNavigateDashboard: () => void;
@@ -33,34 +32,8 @@ export const AdminLoginPage: React.FC<AdminLoginPageProps> = ({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showSetupGuide, setShowSetupGuide] = useState(false);
 
-  // Password Reset state
+  // The backend password is not reset through Firebase Authentication.
   const [showResetModal, setShowResetModal] = useState(false);
-  const [resetEmail, setResetEmail] = useState('kamilathosseni4@gmail.com');
-  const [isResetLoading, setIsResetLoading] = useState(false);
-  const [resetFeedback, setResetFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
-
-  const handleSendResetEmail = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setResetFeedback(null);
-    setIsResetLoading(true);
-    try {
-      await sendPasswordResetEmail(auth, resetEmail.trim());
-      setIsResetLoading(false);
-      setResetFeedback({
-        type: 'success',
-        message: `Un lien officiel Google/Firebase a été envoyé à "${resetEmail.trim()}". Ouvrez cet e-mail pour configurer ou réinitialiser votre mot de passe personnel.`
-      });
-    } catch (err: any) {
-      setIsResetLoading(false);
-      let msg = "Impossible d'envoyer l'e-mail de réinitialisation.";
-      if (err?.code === 'auth/user-not-found') {
-        msg = `Aucun compte n'a encore été créé pour "${resetEmail.trim()}" dans Firebase Authentication. Connectez-vous une première fois avec votre compte Google sur la boutique pour initialiser l'utilisateur.`;
-      } else if (err?.code === 'auth/invalid-email') {
-        msg = "Format d'adresse e-mail invalide.";
-      }
-      setResetFeedback({ type: 'error', message: msg });
-    }
-  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -218,10 +191,7 @@ export const AdminLoginPage: React.FC<AdminLoginPageProps> = ({
                 </label>
                 <button
                   type="button"
-                  onClick={() => {
-                    setResetFeedback(null);
-                    setShowResetModal(true);
-                  }}
+                  onClick={() => setShowResetModal(true)}
                   className="text-[11px] text-amber-400 hover:text-amber-300 transition-colors underline cursor-pointer"
                 >
                   Mot de passe oublié ?
@@ -299,17 +269,18 @@ export const AdminLoginPage: React.FC<AdminLoginPageProps> = ({
               <div className="mt-3 p-4 bg-[#1c1917] rounded-xl border border-stone-800 text-[11px] text-stone-300 space-y-3 leading-relaxed">
                 <p className="font-semibold text-amber-300 flex items-center gap-1">
                   <Terminal className="w-3.5 h-3.5" />
-                  Prévisualisation du futur accès :
+                  Préparation côté serveur :
                 </p>
                 <ol className="list-decimal list-inside space-y-1.5 text-stone-400">
-                  <li>Inscrivez ou connectez votre compte Firebase Auth (ex: <span className="text-stone-200 font-mono">kamilathosseni4@gmail.com</span>).</li>
-                  <li>Après autorisation explicite, exécutez d’abord le mode aperçu :
+                  <li>Le compte administrateur doit déjà exister dans Firebase Authentication et son adresse e-mail doit être vérifiée. Le serveur ne crée aucun compte.</li>
+                  <li>Configurez dans l’environnement serveur uniquement <code>ADMIN_EMAIL</code> et <code>ADMIN_PASSWORD_HASH</code>.</li>
+                  <li>Générez le hash bcrypt dans un terminal interactif avec saisie masquée :
                     <pre className="bg-stone-900 text-amber-200 p-2 rounded mt-1 font-mono text-[10px] overflow-x-auto">
-{`npm run set-admin -- kamilathosseni4@gmail.com`}
+{`npm run admin:hash`}
                     </pre>
                   </li>
-                  <li>Une attribution effective exige <code>--apply</code> et une confirmation interactive liée à l’UID. Aucun privilège n’est attribué actuellement.</li>
-                  <li>Le compte doit être vérifié dans Firebase Authentication; ne créez pas de compte fictif.</li>
+                  <li>Le backend utilise Firebase Admin ADC sur <code>zstore-7ed88</code> pour signer un jeton Firebase temporaire et un cookie de session HttpOnly; les règles vérifient <code>request.auth.token.admin</code>.</li>
+                  <li>Ne lancez pas le script persistant <code>set-admin</code> pour ce mode de connexion.</li>
                 </ol>
               </div>
             )}
@@ -318,14 +289,14 @@ export const AdminLoginPage: React.FC<AdminLoginPageProps> = ({
         </div>
       </div>
 
-      {/* Password Reset Modal */}
+      {/* Backend-managed administrator password notice */}
       {showResetModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-xs">
           <div className="bg-[#262220] border border-stone-700 max-w-md w-full rounded-3xl p-6 sm:p-8 space-y-5 shadow-2xl relative">
             <div className="flex items-center justify-between pb-3 border-b border-stone-800">
               <div className="flex items-center gap-2 text-amber-400">
                 <Key className="w-5 h-5" />
-                <h3 className="font-serif text-lg font-bold text-white">Définir / Réinitialiser le Mot de Passe</h3>
+                <h3 className="font-serif text-lg font-bold text-white">Mot de passe administrateur</h3>
               </div>
               <button
                 onClick={() => setShowResetModal(false)}
@@ -336,58 +307,12 @@ export const AdminLoginPage: React.FC<AdminLoginPageProps> = ({
             </div>
 
             <p className="text-xs text-stone-300 leading-relaxed">
-              Un lien officiel sécurisé Google Firebase vous sera envoyé par e-mail. Il vous permettra de définir votre mot de passe administrateur personnel en toute confidentialité, sans jamais le stocker dans le code source ni dans Firestore.
+              Ce mot de passe est vérifié côté serveur contre le hash bcrypt ADMIN_PASSWORD_HASH.
+              Un e-mail de réinitialisation Firebase ne le modifierait pas. Demandez à l’administrateur technique
+              de générer un nouveau hash et de mettre à jour le secret dans l’environnement serveur.
             </p>
 
-            {resetFeedback && (
-              <div
-                className={`p-3 rounded-xl text-xs flex items-start gap-2 ${
-                  resetFeedback.type === 'success'
-                    ? 'bg-emerald-950/80 border border-emerald-700/60 text-emerald-200'
-                    : 'bg-rose-950/80 border border-rose-700/60 text-rose-200'
-                }`}
-              >
-                {resetFeedback.type === 'success' ? (
-                  <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
-                ) : (
-                  <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
-                )}
-                <p>{resetFeedback.message}</p>
-              </div>
-            )}
-
-            <form onSubmit={handleSendResetEmail} className="space-y-4">
-              <div>
-                <label className="block text-xs uppercase font-medium text-stone-400 mb-1.5 tracking-wider">
-                  Adresse Email du Compte Administrateur
-                </label>
-                <div className="relative">
-                  <input
-                    type="email"
-                    required
-                    value={resetEmail}
-                    onChange={(e) => setResetEmail(e.target.value)}
-                    className="w-full bg-[#1c1917] border border-stone-700 rounded-xl px-3.5 py-2.5 pl-10 text-xs text-stone-100 focus:outline-none focus:border-amber-600 focus:ring-1 focus:ring-amber-600"
-                  />
-                  <Mail className="w-4 h-4 text-stone-500 absolute left-3.5 top-3" />
-                </div>
-              </div>
-
-              <div className="flex gap-2.5 pt-1">
-                <button
-                  type="submit"
-                  disabled={isResetLoading}
-                  className="flex-1 py-3 bg-amber-700 hover:bg-amber-600 text-white rounded-xl text-xs uppercase tracking-wider font-bold transition-all shadow-md flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer"
-                >
-                  {isResetLoading ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Envoi du lien sécurisé...</span>
-                    </>
-                  ) : (
-                    <span>Envoyer l'e-mail de configuration</span>
-                  )}
-                </button>
+            <div className="flex justify-end">
                 <button
                   type="button"
                   onClick={() => setShowResetModal(false)}
@@ -395,8 +320,7 @@ export const AdminLoginPage: React.FC<AdminLoginPageProps> = ({
                 >
                   Fermer
                 </button>
-              </div>
-            </form>
+            </div>
           </div>
         </div>
       )}

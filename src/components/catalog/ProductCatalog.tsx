@@ -24,6 +24,7 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({ onOpenDetails })
     categories, 
     isProductsLoading,
     productsError,
+    categoriesError,
     selectedCategory, 
     setSelectedCategory, 
     searchQuery, 
@@ -361,6 +362,11 @@ export const ProductCatalog: React.FC<ProductCatalogProps> = ({ onOpenDetails })
                 >
                   Actualiser
                 </button>
+              </div>
+            )}
+            {categoriesError && (
+              <div role="alert" className="mb-6 p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-800">
+                {categoriesError}
               </div>
             )}
 

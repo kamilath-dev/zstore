@@ -2,8 +2,7 @@ import express, { type Request, type Response } from 'express';
 import 'dotenv/config';
 import { createServer as createViteServer } from 'vite';
 import * as path from 'node:path';
-import { randomInt, createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto';
-import bcrypt from 'bcryptjs';
+import { randomInt, createHash } from 'node:crypto';
 import { applicationDefault, getApps, initializeApp } from 'firebase-admin/app';
 import { getAuth } from 'firebase-admin/auth';
 import {
@@ -14,6 +13,10 @@ import {
 import type { CartItem, Order, Product, PromoCode } from './src/types';
 import { calculateDeliveryFee } from './src/utils/currency';
 import { validateOrderRequest } from './src/services/orderValidation';
+import {
+  validateAdminAuthConfig,
+  verifyAdminPassword
+} from './src/services/adminAuthSecurity';
 
 const PROJECT_ID = 'zstore-7ed88';
 const PORT = Number.parseInt(process.env.PORT || '3000', 10);
@@ -36,38 +39,19 @@ const firestore = getFirestore(adminApp);
 
 app.use(express.json({ limit: '64kb' }));
 
-interface AdminSession {
-  uid: string;
-  email: string;
-  expiresAt: number;
-}
-
 interface LoginRateLimit {
   attempts: number;
   firstAttemptAt: number;
   lockedUntil: number;
 }
 
-const adminSessions = new Map<string, AdminSession>();
 const adminLoginAttempts = new Map<string, LoginRateLimit>();
 
 function getAdminConfig() {
-  const email = process.env.ADMIN_EMAIL?.trim().toLowerCase();
-  const passwordHash = process.env.ADMIN_PASSWORD_HASH?.trim();
-  const sessionSecret = process.env.ADMIN_SESSION_SECRET;
-  if (!email || !passwordHash || !sessionSecret) {
-    throw new Error('ADMIN_EMAIL, ADMIN_PASSWORD_HASH et ADMIN_SESSION_SECRET doivent être configurés côté serveur.');
-  }
-  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) ||
-      !/^\$2[aby]\$\d{2}\$[./A-Za-z0-9]{53}$/.test(passwordHash) ||
-      sessionSecret.length < 32) {
-    throw new Error('La configuration d’authentification administrateur est invalide.');
-  }
-  return { email, passwordHash, sessionSecret };
-}
-
-function getClientAddress(req: Request): string {
-  return req.socket.remoteAddress || 'unknown';
+  return validateAdminAuthConfig(
+    process.env.ADMIN_EMAIL,
+    process.env.ADMIN_PASSWORD_HASH
+  );
 }
 
 function recordAdminLoginFailure(key: string): void {
@@ -91,30 +75,11 @@ function setAdminSessionCookie(res: Response, value: string, maxAgeMs: number): 
   );
 }
 
-function readAdminSession(req: Request): AdminSession | null {
-  try {
-    const cookie = req.headers.cookie?.split(';')
-      .map(value => value.trim())
-      .find(value => value.startsWith(`${ADMIN_SESSION_COOKIE}=`));
-    if (!cookie) return null;
-    const token = cookie.slice(ADMIN_SESSION_COOKIE.length + 1);
-    const separator = token.indexOf('.');
-    if (separator <= 0) return null;
-    const sessionId = token.slice(0, separator);
-    const signature = token.slice(separator + 1);
-    const { sessionSecret } = getAdminConfig();
-    const expected = createHmac('sha256', sessionSecret).update(sessionId).digest();
-    const actual = Buffer.from(signature, 'hex');
-    if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) return null;
-    const session = adminSessions.get(sessionId);
-    if (!session || session.expiresAt <= Date.now()) {
-      adminSessions.delete(sessionId);
-      return null;
-    }
-    return session;
-  } catch {
-    return null;
-  }
+function getAdminSessionCookie(req: Request): string | null {
+  const cookie = req.headers.cookie?.split(';')
+    .map(value => value.trim())
+    .find(value => value.startsWith(`${ADMIN_SESSION_COOKIE}=`));
+  return cookie?.slice(ADMIN_SESSION_COOKIE.length + 1) || null;
 }
 
 app.post('/api/admin/login', async (req: Request, res: Response) => {
@@ -132,7 +97,7 @@ app.post('/api/admin/login', async (req: Request, res: Response) => {
     return res.status(503).json({ message: 'L’authentification administrateur n’est pas configurée sur le serveur.' });
   }
 
-  const rateLimitKey = `${getClientAddress(req)}:${email}`;
+  const rateLimitKey = config.email;
   const rateLimit = adminLoginAttempts.get(rateLimitKey);
   if (rateLimit?.lockedUntil && rateLimit.lockedUntil > Date.now()) {
     return res.status(429).json({ message: 'Trop de tentatives. Réessayez dans quelques minutes.' });
@@ -141,15 +106,20 @@ app.post('/api/admin/login', async (req: Request, res: Response) => {
     adminLoginAttempts.delete(rateLimitKey);
   }
 
-  let passwordMatches = false;
+  let credentialsValid = false;
   try {
-    passwordMatches = await bcrypt.compare(password, config.passwordHash);
+    credentialsValid = await verifyAdminPassword(
+      email,
+      password,
+      config.email,
+      config.passwordHash
+    );
   } catch (error) {
     console.error('Admin bcrypt verification failed:', error);
     return res.status(503).json({ message: 'La configuration d’authentification administrateur est invalide.' });
   }
 
-  if (email !== config.email || !passwordMatches) {
+  if (!credentialsValid) {
     recordAdminLoginFailure(rateLimitKey);
     return res.status(401).json({ message: 'Identifiants administrateur invalides.' });
   }
@@ -163,13 +133,8 @@ app.post('/api/admin/login', async (req: Request, res: Response) => {
     }
 
     const customToken = await adminAuth.createCustomToken(user.uid, { admin: true });
-    const sessionId = randomBytes(32).toString('base64url');
-    const expiresAt = Date.now() + ADMIN_SESSION_TTL_MS;
-    const signature = createHmac('sha256', config.sessionSecret).update(sessionId).digest('hex');
-    adminSessions.set(sessionId, { uid: user.uid, email: config.email, expiresAt });
     adminLoginAttempts.delete(rateLimitKey);
-    setAdminSessionCookie(res, `${sessionId}.${signature}`, ADMIN_SESSION_TTL_MS);
-    return res.status(200).json({ success: true, customToken, expiresAt });
+    return res.status(200).json({ success: true, customToken });
   } catch (error) {
     const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
     if (code === 'auth/user-not-found') {
@@ -182,26 +147,65 @@ app.post('/api/admin/login', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/api/admin/session', (req: Request, res: Response) => {
-  const session = readAdminSession(req);
-  if (!session) return res.status(401).json({ authenticated: false });
-  return res.status(200).json({
-    authenticated: true,
-    admin: { uid: session.uid, email: session.email },
-    expiresAt: session.expiresAt
-  });
+app.post('/api/admin/session', async (req: Request, res: Response) => {
+  const authorization = req.headers.authorization;
+  if (!authorization?.startsWith('Bearer ')) {
+    return res.status(401).json({ message: 'Jeton Firebase requis.' });
+  }
+  try {
+    const idToken = authorization.slice('Bearer '.length);
+    const decoded = await adminAuth.verifyIdToken(idToken, true);
+    if (decoded.admin !== true) {
+      return res.status(403).json({ message: 'Le jeton Firebase ne possède pas le rôle administrateur.' });
+    }
+    const sessionCookie = await adminAuth.createSessionCookie(idToken, {
+      expiresIn: ADMIN_SESSION_TTL_MS
+    });
+    setAdminSessionCookie(res, sessionCookie, ADMIN_SESSION_TTL_MS);
+    return res.status(200).json({
+      success: true,
+      expiresAt: Date.now() + ADMIN_SESSION_TTL_MS
+    });
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    if (['auth/argument-error', 'auth/invalid-id-token', 'auth/id-token-expired', 'auth/id-token-revoked'].includes(code)) {
+      return res.status(401).json({ message: 'Le jeton Firebase est invalide ou expiré.' });
+    }
+    console.error('Admin session creation failed:', error);
+    return res.status(503).json({ message: 'La session administrateur ne peut pas être créée pour le moment.' });
+  }
 });
 
-app.post('/api/admin/logout', (req: Request, res: Response) => {
-  const session = readAdminSession(req);
-  if (session) {
-    const cookie = req.headers.cookie?.split(';')
-      .map(value => value.trim())
-      .find(value => value.startsWith(`${ADMIN_SESSION_COOKIE}=`));
-    const token = cookie?.slice(ADMIN_SESSION_COOKIE.length + 1);
-    const sessionId = token?.split('.')[0];
-    if (sessionId) adminSessions.delete(sessionId);
+app.get('/api/admin/session', async (req: Request, res: Response) => {
+  const sessionCookie = getAdminSessionCookie(req);
+  if (!sessionCookie) return res.status(401).json({ authenticated: false });
+  try {
+    const decoded = await adminAuth.verifySessionCookie(sessionCookie, true);
+    if (decoded.admin !== true) return res.status(403).json({ authenticated: false });
+    return res.status(200).json({
+      authenticated: true,
+      admin: { uid: decoded.uid, email: decoded.email || null },
+      expiresAt: decoded.exp * 1000
+    });
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    if ([
+      'auth/argument-error',
+      'auth/invalid-session-cookie',
+      'auth/session-cookie-expired',
+      'auth/session-cookie-revoked',
+      'auth/id-token-revoked',
+      'auth/user-disabled',
+      'auth/user-not-found'
+    ].includes(code)) {
+      return res.status(401).json({ authenticated: false });
+    }
+    console.error('Admin session verification failed:', error);
+    return res.status(503).json({ authenticated: false, message: 'La session administrateur ne peut pas être vérifiée.' });
   }
+});
+
+app.post('/api/admin/logout', (_req: Request, res: Response) => {
   setAdminSessionCookie(res, '', 0);
   return res.status(200).json({ success: true });
 });
@@ -287,4 +291,181 @@ app.post('/api/orders', async (req: Request, res: Response) => {
   const nowIso = new Date().toISOString();
 
   try {
-    const order = await firestore.
+    const order = await firestore.runTransaction(async transaction => {
+      const priorOrder = await transaction.get(orderRef);
+      if (priorOrder.exists) {
+        const existing = priorOrder.data() as Record<string, unknown>;
+        if (
+          existing.userId !== userId ||
+          !matchesExistingOrder(existing, orderRequest, userId)
+        ) {
+          const error = new Error('Cette clé de commande a déjà été utilisée pour un autre panier.');
+          error.name = 'IdempotencyConflict';
+          throw error;
+        }
+        return { ...(existing as unknown as Omit<Order, 'id'>), id: priorOrder.id };
+      }
+
+      const requestedQuantities = new Map<string, number>();
+      for (const item of orderRequest.items) {
+        requestedQuantities.set(
+          item.productId,
+          (requestedQuantities.get(item.productId) || 0) + item.quantity
+        );
+      }
+
+      const productRecords: Array<{
+        ref: DocumentReference;
+        data: DocumentData;
+        quantity: number;
+      }> = [];
+      let subtotal = 0;
+
+      for (const [productId, quantity] of requestedQuantities) {
+        const productRef = firestore.collection('products').doc(productId);
+        const productSnapshot = await transaction.get(productRef);
+        if (!productSnapshot.exists) {
+          throw new Error(`Le produit ${productId} n’existe plus en boutique.`);
+        }
+        const productData = productSnapshot.data();
+        if (
+          !productData ||
+          typeof productData.price !== 'number' ||
+          !Number.isFinite(productData.price) ||
+          productData.price < 0 ||
+          !Number.isSafeInteger(productData.stock) ||
+          productData.stock < quantity
+        ) {
+          throw new Error(`Stock insuffisant ou données invalides pour "${productData?.name || productId}".`);
+        }
+        subtotal += productData.price * quantity;
+        if (!Number.isFinite(subtotal)) {
+          throw new Error('Le montant de la commande dépasse la limite autorisée.');
+        }
+        productRecords.push({ ref: productRef, data: productData, quantity });
+      }
+
+      const promoSnapshot = orderRequest.promoCode
+        ? await transaction.get(firestore.collection('promos').doc(orderRequest.promoCode))
+        : null;
+      let appliedPromo: PromoCode | undefined;
+      let discount = 0;
+      if (orderRequest.promoCode) {
+        if (!promoSnapshot?.exists) throw new Error('Ce code promotionnel n’est plus disponible.');
+        const promoData = promoSnapshot.data() as PromoCode;
+        if (promoData.code !== orderRequest.promoCode || promoData.isActive !== true) {
+          throw new Error('Ce code promotionnel n’est plus actif.');
+        }
+        if (
+          typeof promoData.minOrderAmount === 'number' &&
+          subtotal < promoData.minOrderAmount
+        ) {
+          throw new Error(`Le panier minimum pour ce code est de ${promoData.minOrderAmount.toLocaleString()} FCFA.`);
+        }
+        if (
+          promoData.discountPercent !== undefined &&
+          (!Number.isFinite(promoData.discountPercent) || promoData.discountPercent < 0 || promoData.discountPercent > 100)
+        ) {
+          throw new Error('La configuration de cette promotion est invalide.');
+        }
+        if (
+          promoData.discountAmount !== undefined &&
+          (!Number.isFinite(promoData.discountAmount) || promoData.discountAmount < 0)
+        ) {
+          throw new Error('La configuration de cette promotion est invalide.');
+        }
+        discount = promoData.discountPercent
+          ? Math.round((subtotal * promoData.discountPercent) / 100)
+          : promoData.discountAmount || 0;
+        appliedPromo = promoData;
+      }
+
+      const deliveryFee = calculateDeliveryFee(
+        orderRequest.deliveryDetails.city,
+        orderRequest.deliveryDetails.deliveryOption,
+        subtotal
+      );
+      const items: CartItem[] = orderRequest.items.map(requestItem => {
+        const productRecord = productRecords.find(item => item.ref.id === requestItem.productId);
+        if (!productRecord) throw new Error('Données de commande incohérentes.');
+        return {
+          product: { ...productRecord.data, id: productRecord.ref.id } as Product,
+          quantity: requestItem.quantity,
+          ...(requestItem.selectedColor === undefined ? {} : { selectedColor: requestItem.selectedColor }),
+          ...(requestItem.selectedSize === undefined ? {} : { selectedSize: requestItem.selectedSize })
+        };
+      });
+      const newOrder: Order = {
+        id: orderId,
+        orderNumber: `ZS-BN-${new Date().getFullYear()}-${randomInt(100000, 1000000)}`,
+        date: nowIso,
+        userId,
+        items,
+        subtotal,
+        deliveryFee,
+        discount,
+        ...(appliedPromo ? { appliedPromo: appliedPromo.code } : {}),
+        total: Math.max(0, subtotal + deliveryFee - discount),
+        deliveryDetails: orderRequest.deliveryDetails,
+        status: 'en_attente',
+        paymentMethod: orderRequest.paymentMethod,
+        isPaid: false,
+        timeline: [{
+          status: 'en_attente',
+          timestamp: new Date(nowIso).toLocaleString('fr-FR', { dateStyle: 'short', timeStyle: 'short' }),
+          note: 'Commande enregistrée par le serveur ZStore'
+        }]
+      };
+      if (!Number.isFinite(newOrder.total)) {
+        throw new Error('Le montant total de la commande est invalide.');
+      }
+
+      for (const record of productRecords) {
+        transaction.update(record.ref, {
+          stock: record.data.stock - record.quantity,
+          updatedAt: nowIso
+        });
+      }
+      transaction.create(orderRef, { ...newOrder, createdAt: nowIso });
+      return newOrder;
+    });
+
+    return res.status(200).json({ order });
+  } catch (error) {
+    if (error instanceof Error && error.name === 'IdempotencyConflict') {
+      return res.status(409).json({ error: error.message });
+    }
+    if (error instanceof Error && /n’existe plus|Stock insuffisant|promotionnel|panier minimum|configuration|montant/.test(error.message)) {
+      return res.status(409).json({ error: error.message });
+    }
+    console.error('Order transaction failed:', error);
+    return res.status(503).json({ error: 'La commande n’a pas pu être enregistrée. Veuillez réessayer.' });
+  }
+});
+
+async function startServer() {
+  const isProd = process.env.NODE_ENV === 'production';
+  if (!isProd) {
+    const vite = await createViteServer({
+      server: { middlewareMode: true },
+      appType: 'spa'
+    });
+    app.use(vite.middlewares);
+  } else {
+    const distPath = path.resolve(process.cwd(), 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (_req, res) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
+  }
+
+  app.listen(PORT, HOST, () => {
+    console.log(`ZStore server listening at http://${HOST}:${PORT} (${isProd ? 'production' : 'development'}).`);
+    console.log(`Firebase Admin target: ${PROJECT_ID} / (default).`);
+  });
+}
+
+startServer().catch(error => {
+  console.error('ZStore server startup failed:', error);
+  process.exit(1);
+});

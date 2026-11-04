@@ -41,6 +41,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ isOpen, onClose 
     orders, 
     isProductsLoading,
     isOrdersLoading,
+    productsError,
+    categoriesError,
+    promosError,
+    ordersError,
     updateOrderStatus, 
     addProduct, 
     updateProduct, 
@@ -305,6 +309,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({ isOpen, onClose 
 
         {/* Tab Body */}
         <div className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8 bg-[#faf8f5]">
+          {[productsError, categoriesError, promosError, ordersError]
+            .filter((message): message is string => Boolean(message))
+            .map((message, index) => (
+              <div
+                key={`${index}-${message}`}
+                role="alert"
+                className="mb-4 rounded-xl border border-rose-200 bg-rose-50 p-3 text-xs text-rose-800 flex items-start gap-2"
+              >
+                <AlertTriangle className="h-4 w-4 shrink-0" />
+                <span>{message}</span>
+              </div>
+            ))}
           
           {/* TAB 1: OVERVIEW */}
           {activeTab === 'overview' && (

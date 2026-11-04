@@ -28,6 +28,7 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({ onProceedToCheckout }) =
     cartSubtotal, 
     cartTotalCount,
     appliedPromo,
+    promosError,
     applyPromoCode,
     removePromoCode,
     promoDiscount
@@ -218,6 +219,11 @@ export const CartDrawer: React.FC<CartDrawerProps> = ({ onProceedToCheckout }) =
                     <Tag className="w-3.5 h-3.5 text-amber-700" />
                     <span>Code Avantage / Promotion</span>
                   </div>
+                  {promosError && (
+                    <p role="alert" className="mb-2 text-[11px] text-rose-700">
+                      {promosError}
+                    </p>
+                  )}
 
                   {appliedPromo ? (
                     <div className="flex items-center justify-between bg-emerald-50 text-emerald-800 px-3 py-2 rounded-lg text-xs border border-emerald-200">

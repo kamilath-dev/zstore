@@ -33,8 +33,11 @@ interface StoreContextType {
   // Catalog & Filter
   products: Product[];
   categories: Category[];
+  isCategoriesLoading: boolean;
   isProductsLoading: boolean;
   productsError: string | null;
+  categoriesError: string | null;
+  promosError: string | null;
   selectedCategory: CategorySlug | 'all';
   setSelectedCategory: (cat: CategorySlug | 'all') => void;
   searchQuery: string;
@@ -81,6 +84,7 @@ interface StoreContextType {
   // Orders
   orders: Order[];
   isOrdersLoading: boolean;
+  ordersError: string | null;
   updateOrderStatus: (orderId: string, newStatus: OrderStatus, note?: string) => Promise<void>;
   lastConfirmedOrder: Order | null;
   setLastConfirmedOrder: (order: Order | null) => void;
@@ -96,6 +100,7 @@ interface StoreContextType {
   updateCategory: (id: string, updates: Partial<Category>) => Promise<void>;
   deleteCategory: (id: string) => Promise<void>;
   promos: PromoCode[];
+  isPromosLoading: boolean;
   addPromoCode: (promo: PromoCode) => Promise<void>;
   togglePromoActive: (code: string) => Promise<void>;
 
@@ -114,8 +119,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Real Firestore Products State
   const [products, setProducts] = useState<Product[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
+  const [isCategoriesLoading, setIsCategoriesLoading] = useState(true);
   const [isProductsLoading, setIsProductsLoading] = useState(true);
   const [productsError, setProductsError] = useState<string | null>(null);
+  const [categoriesError, setCategoriesError] = useState<string | null>(null);
+  const [promosError, setPromosError] = useState<string | null>(null);
 
   // Filters
   const [selectedCategory, setSelectedCategory] = useState<CategorySlug | 'all'>('all');
@@ -161,9 +169,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   // Real-time Orders from Firestore
   const [orders, setOrders] = useState<Order[]>([]);
   const [isOrdersLoading, setIsOrdersLoading] = useState(false);
+  const [ordersError, setOrdersError] = useState<string | null>(null);
 
   // Promos
   const [promos, setPromos] = useState<PromoCode[]>([]);
+  const [isPromosLoading, setIsPromosLoading] = useState(true);
   const [appliedPromo, setAppliedPromo] = useState<PromoCode | null>(null);
 
   // Save cart to localStorage
@@ -194,7 +204,9 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         localStorage.setItem(WISHLIST_STORAGE_KEY, JSON.stringify(validIds));
         if (firebaseUser) {
           const userDocRef = doc(db, 'users', firebaseUser.uid);
-          updateDoc(userDocRef, { wishlist: validIds }).catch(() => {});
+          updateDoc(userDocRef, { wishlist: validIds }).catch(error => {
+            console.error('Could not synchronize the user wishlist:', error);
+          });
         }
       }
     }
@@ -218,9 +230,10 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       },
       (error) => {
         console.error('Products listener error:', error);
-        setProductsError('Impossible de charger le catalogue depuis Cloud Firestore.');
+        setProductsError(error.code === 'permission-denied'
+          ? 'Lecture refusée par les règles Firestore. Vérifiez les règles publiées pour products.'
+          : 'Impossible de charger le catalogue depuis Cloud Firestore.');
         setIsProductsLoading(false);
-        handleFirestoreError(error, OperationType.LIST, 'products');
       }
     );
 
@@ -229,10 +242,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   // 2. Real-time Firestore Listener for Categories
   useEffect(() => {
+    setIsCategoriesLoading(true);
+    setCategoriesError(null);
     const categoriesRef = collection(db, 'categories');
     const unsubscribe = onSnapshot(
       categoriesRef,
       (snapshot) => {
+        setCategoriesError(null);
+        setIsCategoriesLoading(false);
         const loaded: Category[] = [];
         snapshot.forEach((docSnap) => {
           loaded.push({ id: docSnap.id, ...docSnap.data() } as Category);
@@ -240,8 +257,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setCategories(loaded);
       },
       (error) => {
-        // Fallback to static category structures if collection is not yet populated
-        console.warn('Categories notice:', error.message);
+        console.error('Categories listener error:', error);
+        setCategories([]);
+        setIsCategoriesLoading(false);
+        setCategoriesError(error.code === 'permission-denied'
+          ? 'Lecture refusée par les règles Firestore. Vérifiez les règles publiées pour categories.'
+          : 'Impossible de charger les catégories depuis Cloud Firestore.');
       }
     );
 
@@ -250,10 +271,14 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
 
   // 3. Real-time Firestore Listener for Promos
   useEffect(() => {
+    setIsPromosLoading(true);
+    setPromosError(null);
     const promosRef = collection(db, 'promos');
     const unsubscribe = onSnapshot(
       promosRef,
       (snapshot) => {
+        setPromosError(null);
+        setIsPromosLoading(false);
         const loaded: PromoCode[] = [];
         snapshot.forEach((docSnap) => {
           loaded.push(docSnap.data() as PromoCode);
@@ -261,7 +286,12 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         setPromos(loaded);
       },
       (error) => {
-        console.warn('Promos listener notice:', error.message);
+        console.error('Promos listener error:', error);
+        setPromos([]);
+        setIsPromosLoading(false);
+        setPromosError(error.code === 'permission-denied'
+          ? 'Lecture refusée par les règles Firestore. Vérifiez les règles publiées pour promos.'
+          : 'Impossible de charger les promotions depuis Cloud Firestore.');
       }
     );
 
@@ -272,11 +302,13 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
   useEffect(() => {
     if (!firebaseUser) {
       setOrders([]);
+      setOrdersError(null);
       setIsOrdersLoading(false);
       return;
     }
 
     setIsOrdersLoading(true);
+    setOrdersError(null);
 
     // If Admin: listen to all orders. If Customer: listen to orders where userId == firebaseUser.uid
     const ordersRef = collection(db, 'orders');
@@ -287,6 +319,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
     const unsubscribe = onSnapshot(
       ordersQuery,
       (snapshot) => {
+        setOrdersError(null);
         const loaded: Order[] = [];
         snapshot.forEach((docSnap) => {
           loaded.push({ id: docSnap.id, ...docSnap.data() } as Order);
@@ -298,8 +331,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       },
       (error) => {
         console.error('Orders listener error:', error);
+        setOrders([]);
+        setOrdersError(error.code === 'permission-denied'
+          ? 'Lecture refusée pour les commandes. Vérifiez la session et les règles Firestore.'
+          : 'Impossible de charger les commandes depuis Cloud Firestore.');
         setIsOrdersLoading(false);
-        handleFirestoreError(error, OperationType.LIST, 'orders');
       }
     );
 
@@ -631,8 +667,11 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
       value={{
         products,
         categories,
+        isCategoriesLoading,
         isProductsLoading,
         productsError,
+        categoriesError,
+        promosError,
         selectedCategory,
         setSelectedCategory,
         searchQuery,
@@ -669,6 +708,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         placeOrder,
         orders,
         isOrdersLoading,
+        ordersError,
         updateOrderStatus,
         lastConfirmedOrder,
         setLastConfirmedOrder,
@@ -682,6 +722,7 @@ export const StoreProvider: React.FC<{ children: React.ReactNode }> = ({ childre
         updateCategory,
         deleteCategory,
         promos,
+        isPromosLoading,
         addPromoCode,
         togglePromoActive,
         reloadProducts

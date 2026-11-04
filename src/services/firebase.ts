@@ -6,9 +6,11 @@ import {
   signOut as fbSignOut,
   onAuthStateChanged,
   signInWithEmailAndPassword,
+  signInWithCustomToken,
   createUserWithEmailAndPassword,
   updateProfile as fbUpdateProfile,
   sendPasswordResetEmail,
+  onIdTokenChanged,
   User as FirebaseUser
 } from 'firebase/auth';
 import { 
@@ -121,10 +123,12 @@ export async function uploadImageToStorage(
 
 export { 
   signInWithEmailAndPassword, 
+  signInWithCustomToken,
   createUserWithEmailAndPassword, 
   fbUpdateProfile, 
   fbSignOut, 
   signInWithPopup, 
   onAuthStateChanged,
+  onIdTokenChanged,
   sendPasswordResetEmail
 };

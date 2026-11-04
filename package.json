@@ -11,9 +11,11 @@
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test:orders": "tsx scripts/test-order-validation.ts",
+    "test:admin-auth": "tsx scripts/test-admin-auth-security.ts",
     "test:target": "tsx scripts/test-firebase-target.ts",
     "test:security": "tsx scripts/test-security-rules.ts",
-    "set-admin": "tsx scripts/set-admin-claim.ts"
+    "set-admin": "tsx scripts/set-admin-claim.ts",
+    "admin:hash": "tsx scripts/hash-admin-password.ts"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",

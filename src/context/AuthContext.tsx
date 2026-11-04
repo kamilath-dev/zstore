@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useEffect, useState } from 'react';
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
 import type { UserProfile } from '../types';
 import {
   auth,
@@ -9,7 +9,9 @@ import {
   signInWithPopup,
   fbSignOut,
   onAuthStateChanged,
+  onIdTokenChanged,
   signInWithEmailAndPassword,
+  signInWithCustomToken,
   createUserWithEmailAndPassword,
   fbUpdateProfile
 } from '../services/firebase';
@@ -45,6 +47,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [isAuthLoading, setIsAuthLoading] = useState(true);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [intendedAction, setIntendedAction] = useState<string | null>(null);
+  const adminLoginInProgressRef = useRef(false);
 
   const checkAdminClaims = async (fbUser: FirebaseUser, forceRefresh = false): Promise<boolean> => {
     try {
@@ -52,6 +55,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return tokenResult.claims.admin === true;
     } catch (error) {
       console.error('Could not verify Firebase custom claims:', error);
+      return false;
+    }
+  };
+
+  const invalidateAdminSession = async () => {
+    try {
+      const response = await fetch('/api/admin/logout', {
+        method: 'POST',
+        credentials: 'same-origin'
+      });
+      if (!response.ok) console.error('Server admin session could not be revoked.');
+    } catch (error) {
+      console.error('Server admin logout request failed:', error);
+    }
+  };
+
+  const verifyAdminServerSession = async (fbUser: FirebaseUser): Promise<boolean> => {
+    try {
+      const response = await fetch('/api/admin/session', {
+        credentials: 'same-origin'
+      });
+      if (!response.ok) return false;
+      const result: unknown = await response.json();
+      return !!result && typeof result === 'object' &&
+        'authenticated' in result && result.authenticated === true &&
+        'admin' in result && !!result.admin && typeof result.admin === 'object' &&
+        'uid' in result.admin && result.admin.uid === fbUser.uid;
+    } catch (error) {
+      console.error('Could not verify the server admin session:', error);
       return false;
     }
   };
@@ -69,7 +101,17 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return;
       }
 
-      const verifiedAdmin = await checkAdminClaims(fbUser);
+      const hasAdminClaim = await checkAdminClaims(fbUser);
+      const verifiedAdmin = hasAdminClaim && (
+        adminLoginInProgressRef.current || await verifyAdminServerSession(fbUser)
+      );
+      if (hasAdminClaim && !verifiedAdmin) {
+        console.error('Admin claim found without a valid matching server session.');
+        await fbSignOut(auth);
+        await invalidateAdminSession();
+        setIsAuthLoading(false);
+        return;
+      }
       setIsAdmin(verifiedAdmin);
       setIsAdminClaimVerified(true);
 
@@ -115,14 +157,33 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     return () => unsubscribe();
   }, []);
 
+  useEffect(() => {
+    if (!isAdmin) return;
+    const unsubscribe = onIdTokenChanged(auth, async fbUser => {
+      if (!fbUser) return;
+      const hasAdminClaim = await checkAdminClaims(fbUser);
+      const hasValidSession = hasAdminClaim && await verifyAdminServerSession(fbUser);
+      if (!hasValidSession) {
+        console.error('Admin credentials or server session expired; signing out.');
+        await fbSignOut(auth);
+        await invalidateAdminSession();
+        setIsAdmin(false);
+        setIsAdminClaimVerified(false);
+      }
+    });
+    return () => unsubscribe();
+  }, [isAdmin]);
+
   const loginWithGoogle = async () => {
-    await signInWithPopup(auth, googleProvider);
+    const credential = await signInWithPopup(auth, googleProvider);
+    if (!(await checkAdminClaims(credential.user))) await invalidateAdminSession();
     setIsAuthModalOpen(false);
     setIntendedAction(null);
   };
 
   const loginWithEmail = async (email: string, pass: string) => {
-    await signInWithEmailAndPassword(auth, email, pass);
+    const credential = await signInWithEmailAndPassword(auth, email, pass);
+    if (!(await checkAdminClaims(credential.user))) await invalidateAdminSession();
     setIsAuthModalOpen(false);
     setIntendedAction(null);
   };
@@ -130,6 +191,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const registerWithEmail = async (email: string, pass: string, name: string) => {
     const credential = await createUserWithEmailAndPassword(auth, email, pass);
     if (name) await fbUpdateProfile(credential.user, { displayName: name });
+    await invalidateAdminSession();
     setIsAuthModalOpen(false);
     setIntendedAction(null);
   };
@@ -139,25 +201,87 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     pass: string
   ): Promise<{ success: boolean; isAdmin: boolean; error?: string }> => {
     setIsAuthLoading(true);
+    adminLoginInProgressRef.current = true;
     try {
-      const credential = await signInWithEmailAndPassword(auth, email.trim(), pass);
-      const verifiedAdmin = await checkAdminClaims(credential.user, true);
-      setIsAdmin(verifiedAdmin);
+      const response = await fetch('/api/admin/login', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: email.trim(), password: pass })
+      });
+      const result: unknown = await response.json().catch(() => null);
+      if (!response.ok) {
+        const message = result && typeof result === 'object' && 'message' in result &&
+          typeof result.message === 'string'
+          ? result.message
+          : 'La connexion administrateur a échoué.';
+        return { success: false, isAdmin: false, error: message };
+      }
+      if (
+        !result ||
+        typeof result !== 'object' ||
+        !('customToken' in result) ||
+        typeof result.customToken !== 'string'
+      ) {
+        return {
+          success: false,
+          isAdmin: false,
+          error: 'Le serveur a renvoyé une réponse d’authentification invalide.'
+        };
+      }
+      const credential = await signInWithCustomToken(auth, result.customToken);
+      const verifiedAdmin = await checkAdminClaims(credential.user);
+      if (!verifiedAdmin) {
+        await fbSignOut(auth);
+        await invalidateAdminSession();
+        setIsAdmin(false);
+        setIsAdminClaimVerified(false);
+        return {
+          success: false,
+          isAdmin: false,
+          error: 'Le jeton Firebase ne contient pas le claim administrateur attendu.'
+        };
+      }
+      const idToken = await credential.user.getIdToken();
+      const sessionResponse = await fetch('/api/admin/session', {
+        method: 'POST',
+        credentials: 'same-origin',
+        headers: { Authorization: `Bearer ${idToken}` }
+      });
+      if (!sessionResponse.ok) {
+        const sessionResult: unknown = await sessionResponse.json().catch(() => null);
+        const message = sessionResult && typeof sessionResult === 'object' &&
+          'message' in sessionResult && typeof sessionResult.message === 'string'
+          ? sessionResult.message
+          : 'La session administrateur sécurisée n’a pas pu être créée.';
+        await fbSignOut(auth);
+        await invalidateAdminSession();
+        setIsAdmin(false);
+        setIsAdminClaimVerified(false);
+        return { success: false, isAdmin: false, error: message };
+      }
+      setIsAdmin(true);
       setIsAdminClaimVerified(true);
-      return verifiedAdmin
-        ? { success: true, isAdmin: true }
-        : {
-            success: false,
-            isAdmin: false,
-            error: 'Ce compte est connecté, mais ne possède pas le rôle administrateur Firebase.'
-          };
+      setUser(current => current ? { ...current, role: 'admin' } : current);
+      setIsAuthModalOpen(false);
+      setIntendedAction(null);
+      return { success: true, isAdmin: true };
     } catch (error) {
+      if (auth.currentUser && await checkAdminClaims(auth.currentUser)) {
+        await fbSignOut(auth);
+      }
+      await invalidateAdminSession();
+      setIsAdmin(false);
+      setIsAdminClaimVerified(false);
       return {
         success: false,
         isAdmin: false,
-        error: error instanceof Error ? error.message : 'Échec de l’authentification Firebase.'
+        error: error instanceof Error
+          ? error.message
+          : 'Échec de la communication avec le service d’authentification.'
       };
     } finally {
+      adminLoginInProgressRef.current = false;
       setIsAuthLoading(false);
     }
   };
@@ -169,13 +293,19 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setIsAdminClaimVerified(false);
       return false;
     }
-    const verifiedAdmin = await checkAdminClaims(currentUser, true);
+    const hasAdminClaim = await checkAdminClaims(currentUser);
+    const verifiedAdmin = hasAdminClaim && await verifyAdminServerSession(currentUser);
+    if (hasAdminClaim && !verifiedAdmin) {
+      await fbSignOut(auth);
+      await invalidateAdminSession();
+    }
     setIsAdmin(verifiedAdmin);
     setIsAdminClaimVerified(true);
     return verifiedAdmin;
   };
 
   const logout = async () => {
+    await invalidateAdminSession();
     await fbSignOut(auth);
     setUser(null);
     setFirebaseUser(null);
